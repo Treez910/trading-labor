@@ -19,7 +19,7 @@ COINS = {"BTC": "Bitcoin", "ETH": "Ethereum"}
 SCHNELL, LANGSAM = 40, 250
 STARTKAPITAL = 100.0
 GEBUEHR, SLIPPAGE = 0.10, 0.02
-DATEN = Path(__file__).parent / "daten"
+DATEN = Path(__file__).parent
 # Live-Kurse: erste Börse, die antwortet, wird benutzt
 QUELLEN = [("kraken", "{c}/USD"), ("bitstamp", "{c}/USD"), ("binance", "{c}/USDT")]
 GRUEN, ROT, ORANGE, BLAU, GRAU = "#22c55e", "#ef4444", "#f59e0b", "#3b82f6", "#94a3b8"
