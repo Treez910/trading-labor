@@ -19,7 +19,9 @@ COINS = {"BTC": "Bitcoin", "ETH": "Ethereum"}
 SCHNELL, LANGSAM = 40, 250
 STARTKAPITAL = 100.0
 GEBUEHR, SLIPPAGE = 0.10, 0.02
-DATEN = Path(__file__).parent
+DATEN = Path(__file__).parent / "daten"
+if not DATEN.exists():          # Dateien liegen evtl. direkt im Hauptordner
+    DATEN = Path(__file__).parent
 # Live-Kurse: erste Börse, die antwortet, wird benutzt
 QUELLEN = [("kraken", "{c}/USD"), ("bitstamp", "{c}/USD"), ("binance", "{c}/USDT")]
 GRUEN, ROT, ORANGE, BLAU, GRAU = "#22c55e", "#ef4444", "#f59e0b", "#3b82f6", "#94a3b8"
@@ -124,8 +126,9 @@ st.info("**Kein Finanzrat.** Das hier ist ein Lernprojekt, keine Anlageberatung 
         "Kaufempfehlung. Ergebnisse aus der Vergangenheit garantieren nichts für die Zukunft. "
         "Krypto kann stark fallen, investier nie Geld, das du nicht verlieren kannst.", icon="⚠️")
 
-tab_jetzt, tab_charts, tab_labor, tab_ueber = st.tabs(
-    ["🏠 Jetzt", "📊 Charts", "🧪 Labor", "ℹ️ Wie funktioniert das?"])
+tab_jetzt, tab_spiel, tab_charts, tab_labor, tab_kosten, tab_ueber = st.tabs(
+    ["🏠 Jetzt", "🎮 Schlag die Strategie", "📊 Charts", "🧪 Labor", "💸 Gebühren-Rechner",
+     "ℹ️ Wie funktioniert das?"])
 
 # --- Jetzt ------------------------------------------------------------------
 with tab_jetzt:
@@ -254,6 +257,187 @@ with tab_labor:
 
         st.warning("⚠️ Vorsicht Overfitting: Die Einstellung, die rückblickend am besten war, "
                    "ist nicht automatisch die beste für die Zukunft.")
+
+# --- Spiel: Schlag die Strategie --------------------------------------------
+SPIEL_TAGE, VORLAUF = 30, 45
+KOSTEN = (GEBUEHR + SLIPPAGE) / 100
+
+
+@st.cache_data
+def tageskerzen(coin: str):
+    df = lange_daten(coin)
+    if df is None:
+        return None
+    t = df.resample("1D").agg({"open": "first", "high": "max", "low": "min",
+                               "close": "last"}).dropna()
+    t["ma_s"] = t["close"].rolling(7).mean()     # ≈ MA 40 auf 4 h
+    t["ma_l"] = t["close"].rolling(42).mean()    # ≈ MA 250 auf 4 h
+    return t.dropna()
+
+
+def neue_runde():
+    rng = np.random.default_rng()
+    coin = str(rng.choice(list(COINS)))
+    t = tageskerzen(coin)
+    if t is None:
+        st.session_state.pop("spiel", None)
+        return
+    start = int(rng.integers(VORLAUF, len(t) - SPIEL_TAGE))
+    st.session_state["spiel"] = {"coin": coin, "start": start, "schritt": 0,
+                                 "pos": 0, "du": [100.0], "positionen": []}
+
+
+def spiel_schritt(position: int, tage: int = 1):
+    g = st.session_state["spiel"]
+    t = tageskerzen(g["coin"])
+    for _ in range(tage):
+        if g["schritt"] >= SPIEL_TAGE:
+            break
+        i = g["start"] + g["schritt"]
+        wert = g["du"][-1]
+        if position != g["pos"]:
+            wert *= 1 - KOSTEN
+            g["pos"] = position
+        if position == 1:
+            wert *= t["close"].iloc[i] / t["close"].iloc[i - 1]
+        g["du"].append(wert)
+        g["positionen"].append(position)
+        g["schritt"] += 1
+
+
+def regel_verlauf(t, start):
+    wert, pos, verlauf = 100.0, 0, [100.0]
+    for k in range(SPIEL_TAGE):
+        i = start + k
+        signal = int(t["ma_s"].iloc[i - 1] > t["ma_l"].iloc[i - 1])
+        if signal != pos:
+            wert *= 1 - KOSTEN
+            pos = signal
+        if pos == 1:
+            wert *= t["close"].iloc[i] / t["close"].iloc[i - 1]
+        verlauf.append(wert)
+    return verlauf
+
+
+with tab_spiel:
+    st.subheader("🎮 Schlag die Strategie")
+    st.caption(f"Ein echter, zufälliger Ausschnitt aus den letzten Jahren, ohne Datum und "
+               f"ohne Preisangabe. Du entscheidest {SPIEL_TAGE} Tage lang jeden Tag: drin oder "
+               "draußen? Jeder Wechsel kostet Gebühren. Am Ende siehst du, ob du die Regel "
+               "und einfaches Halten geschlagen hast.")
+    if "spiel" not in st.session_state:
+        neue_runde()
+    g = st.session_state.get("spiel")
+    if g is None:
+        st.warning("Historische Daten fehlen.")
+    else:
+        t = tageskerzen(g["coin"])
+        s0 = g["start"]
+        basis = t["close"].iloc[s0 - 1]
+        sicht = t.iloc[s0 - VORLAUF: s0 + g["schritt"]]
+        x = list(range(-VORLAUF + 1, g["schritt"] + 1))
+        norm = 100 / basis
+
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(x=x, open=sicht["open"] * norm, high=sicht["high"] * norm,
+                                     low=sicht["low"] * norm, close=sicht["close"] * norm,
+                                     name="Kurs", increasing_line_color=GRUEN,
+                                     decreasing_line_color=ROT))
+        for k, p in enumerate(g["positionen"], start=1):
+            if p == 1:
+                fig.add_vrect(x0=k - 0.5, x1=k + 0.5, fillcolor=GRUEN, opacity=0.12, line_width=0)
+        fig.add_vline(x=0.5, line_dash="dot", line_color=GRAU)
+        fig.update_layout(xaxis_rangeslider_visible=False, showlegend=False)
+        fig.update_xaxes(title="Tag", range=[-VORLAUF + 0.5, SPIEL_TAGE + 0.5])
+        fig.update_yaxes(title="Kurs (Start = 100)")
+        st.plotly_chart(layout(fig, 430), width="stretch", key="spiel_chart")
+        st.caption("Links der gepunkteten Linie: Vorgeschichte. Grün hinterlegt: Tage, an denen du drin warst.")
+
+        if g["schritt"] < SPIEL_TAGE:
+            s1, s2, s3 = st.columns(3)
+            s1.metric("Tag", f"{g['schritt'] + 1} von {SPIEL_TAGE}")
+            s2.metric("Dein Konto", f"{g['du'][-1]:.2f} €")
+            s3.metric("Du bist gerade", "DRIN" if g["pos"] else "DRAUSSEN")
+            b1, b2, b3 = st.columns(3)
+            if b1.button("📈 Morgen drin sein", type="primary", width="stretch"):
+                spiel_schritt(1); st.rerun()
+            if b2.button("💵 Morgen draußen sein", width="stretch"):
+                spiel_schritt(0); st.rerun()
+            if b3.button("⏩ 5 Tage weiter wie bisher", width="stretch"):
+                spiel_schritt(g["pos"], 5); st.rerun()
+        else:
+            regel = regel_verlauf(t, s0)
+            halten = [100.0] + [100 * (1 - KOSTEN) * t["close"].iloc[s0 + k] / basis
+                                for k in range(SPIEL_TAGE)]
+            du, r, h = g["du"][-1], regel[-1], halten[-1]
+            if du > max(r, h):
+                st.success(f"🏆 Stark! Du hast beide geschlagen: {du:.2f} €")
+            elif du > r or du > h:
+                st.info(f"👍 Nicht schlecht! Du hast einen von beiden geschlagen: {du:.2f} €")
+            else:
+                st.error(f"😅 Diesmal nicht. Du: {du:.2f} €")
+            e1, e2, e3 = st.columns(3)
+            e1.metric("Du", f"{du:.2f} €", f"{du - 100:+.2f} €")
+            e2.metric(f"Regel (MA-Trendfolge)", f"{r:.2f} €", f"{r - 100:+.2f} €")
+            e3.metric("Nur halten", f"{h:.2f} €", f"{h - 100:+.2f} €")
+            wechsel = sum(1 for a, b in zip([0] + g["positionen"], g["positionen"]) if a != b)
+            st.caption(f"Aufgelöst: Das war **{COINS[g['coin']]}** vom "
+                       f"{t.index[s0]:%d.%m.%Y} bis {t.index[s0 + SPIEL_TAGE - 1]:%d.%m.%Y}. "
+                       f"Du hast {wechsel}× gewechselt und dafür rund "
+                       f"{wechsel * KOSTEN * 100:.2f} % Gebühren gezahlt.")
+            vf = go.Figure()
+            vf.add_trace(go.Scatter(y=g["du"], name="Du", line=dict(color=ORANGE, width=3)))
+            vf.add_trace(go.Scatter(y=regel, name="Regel", line=dict(color=GRUEN, width=2)))
+            vf.add_trace(go.Scatter(y=halten, name="Halten", line=dict(color=GRAU, dash="dash")))
+            vf.update_xaxes(title="Tag")
+            st.plotly_chart(layout(vf, 320), width="stretch", key="spiel_ergebnis")
+
+            bilanz = st.session_state.setdefault("bilanz", {"runden": 0, "siege": 0})
+            if not g.get("gezaehlt"):
+                bilanz["runden"] += 1
+                bilanz["siege"] += int(du > r)
+                g["gezaehlt"] = True
+            st.caption(f"Deine Bilanz in dieser Sitzung: {bilanz['siege']} von "
+                       f"{bilanz['runden']} Runden besser als die Regel.")
+            if st.button("🔄 Neue Runde", type="primary"):
+                neue_runde(); st.rerun()
+        st.caption("Über einzelne 30-Tage-Runden entscheidet viel Zufall, auch bei der Regel. "
+                   "Spiel mehrere Runden, dann wird es interessant.")
+
+# --- Gebühren-Rechner -------------------------------------------------------
+with tab_kosten:
+    st.subheader("💸 Was kostet mich mein Trading wirklich?")
+    st.caption("Gebühren sind unsichtbar, weil sie pro Trade klein aussehen. "
+               "Hier siehst du, was sich über ein Jahr ansammelt.")
+    g1, g2, g3, g4 = st.columns(4)
+    konto = g1.number_input("Kontogröße (€)", 10.0, 1_000_000.0, 100.0, 10.0)
+    pro_woche = g2.number_input("Trades pro Woche", 0, 500, 10, 1,
+                                help="Ein Trade = einmal kaufen und wieder verkaufen.")
+    geb = g3.number_input("Gebühr pro Kauf/Verkauf (%)", 0.0, 5.0, 0.10, 0.05)
+    spread = g4.number_input("Spread/Slippage (%)", 0.0, 5.0, 0.05, 0.01,
+                             help="Unterschied zwischen Kauf- und Verkaufskurs. Bei manchen "
+                                  "Apps steckt hier ein Großteil der Kosten.")
+    pro_trade = 2 * geb + spread
+    trades_jahr = pro_woche * 52
+    rest = konto * (1 - pro_trade / 100) ** trades_jahr
+    verlust = konto - rest
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Kosten pro Trade", f"{pro_trade:.2f} %")
+    r2.metric("Trades pro Jahr", f"{trades_jahr:,}".replace(",", "."))
+    r3.metric("Kosten nach 1 Jahr", f"{zahl(verlust, 2)} €",
+              f"{verlust / konto * 100:.0f} % deines Kontos", delta_color="inverse")
+    st.markdown(f"Um nur die Gebühren wieder reinzuholen, muss **jeder einzelne Trade im Schnitt "
+                f"mehr als {pro_trade:.2f} % Gewinn** bringen. Nach einem Jahr wären ohne "
+                f"Gewinne von {zahl(konto, 2)} € nur noch **{zahl(rest, 2)} €** übrig.")
+    wochen = np.arange(0, 53)
+    kurve = konto * (1 - pro_trade / 100) ** (wochen * pro_woche)
+    kf = go.Figure(go.Scatter(x=wochen, y=kurve, fill="tozeroy", line=dict(color=ROT, width=2),
+                              name="Konto"))
+    kf.update_xaxes(title="Woche"); kf.update_yaxes(title="Kontostand (€)", rangemode="tozero")
+    st.markdown("**So schmilzt das Konto nur durch Kosten, ohne einen einzigen Verlusttrade:**")
+    st.plotly_chart(layout(kf, 320), width="stretch", key="kosten_chart")
+    st.caption("Vereinfachte Rechnung: gleich große Trades mit dem ganzen Konto, ohne Gewinne oder "
+               "Verluste. Die Gebühren deiner Börse findest du in deren Preisverzeichnis.")
 
 # --- Über -------------------------------------------------------------------
 with tab_ueber:
